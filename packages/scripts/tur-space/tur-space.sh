@@ -1,5 +1,5 @@
-#!/bin/bash
-VER=1.2
+#!/bin/bash -x
+VER=1.3
 
 ## Set where tur-space.conf is located here.
 config=/glftpd/bin/tur-space.conf
@@ -28,7 +28,7 @@ proc_debug() {
 
 proc_log() {
   if [ "$LOGFILE" ]; then
-    echo `$DATE_BINARY "+%Y-%m-%d %T"` SPACE: \"$*\" >> $LOGFILE
+    echo `$DATE_BINARY "+%a %b %e %T %Y"` SPACE: \"$*\" >> $LOGFILE
   fi
 }
 
@@ -44,16 +44,6 @@ proc_announce() {
   fi
 }
 
-proc_translate_by_id() {
-  trigger_deviceid_check="$1"
-  depth_full_path="`echo "$trigger_deviceid_check" | awk -F'/' '{print NF-1}'`"
-  device_relative_location="`ls -l "$trigger_deviceid_check" | tr -s ' '  | cut -d ' ' -f11`"
-  depth_retour="`echo "$device_relative_location" | awk -F'../' '{print NF-1}'`"
-  device_root="`echo "$trigger_deviceid_check" | cut -d '/' -f$(expr $depth_full_path - $depth_retour)`"
-  device_name="`echo "$device_relative_location" | cut -d '/' -f $(expr $depth_retour + 1)`"
-  trigger_device_check="`echo "/$device_root/$device_name"`"
-}
-
 proc_get_free_space() {
   trigger_device_check="$1"
   unset free_space
@@ -64,13 +54,6 @@ proc_get_free_space() {
     proc_debug "Error. Did not get a device to check free space from ($1)."
     proc_log "Error. Did not get a device to check free space from ($1)."
     exit 1
-  fi
-  
-  org_trigger_device=""
-  if [ -z "${trigger_device_check##*/disk/by-*}" ] ;then
-    org_trigger_device="`echo "$trigger_device_check"`"
-    proc_translate_by_id $trigger_device_check
-    proc_debug "Translated $org_trigger_device to actual device $trigger_device_check"
   fi
 
   free_space="`df -Pm | grep "$trigger_device_check" | tr -s ' ' | cut -d ' ' -f4`"
@@ -236,7 +219,7 @@ proc_find_destination_old() {
 
       while [ "$source_release_size" -ge "$free_space" ]; do
 
-proc_log "Starting loop. source_release_size: $source_release_size - free_space: $free_space - $destinations" 
+       proc_log "Starting loop. source_release_size: $source_release_size - free_space: $free_space - $destinations" 
 
         ## Make sure we dont del more then $MAX_LOOP things.
         loop_count=$[$loop_count+1]
@@ -255,9 +238,9 @@ proc_log "Starting loop. source_release_size: $source_release_size - free_space:
         if [ "$DEBUG" = "TRUE" ]; then IGNORES="$IGNORES|::$source_release::"; fi
 
         MODE="ARCHIVE"        
-proc_log  "Running proc_find_oldest_dir $source_release_path $source_name $source_device"
+        proc_log  "Running proc_find_oldest_dir $source_release_path $source_name $source_device"
         proc_find_oldest_dir $source_release_path $source_name $source_device
-proc_log "proc_find_oldest_dir returned $oldest_dir_raw"
+        proc_log "proc_find_oldest_dir returned $oldest_dir_raw"
 
         if [ -z "$oldest_dir_raw" ]; then
           proc_debug "Error. Nothing to delete in $source_release_path on $source_device."
@@ -311,8 +294,13 @@ proc_delete() {
       proc_get_release_size
 
       proc_log "Freeing ${check_release_size} MB from ${source_release_path} by deleting ${source_release}"
-      proc_announce "TSD: \"${source_release}\" \"${check_release_size}\" \"${source_release_path}\" \"${source_name}\""
 
+      if [[ ${source_release_path} =~ "$ARCHIVE_NAME" ]]; then
+  	proc_announce "TSDA: \"${source_release}\" \"${check_release_size}\" \"${source_release_path}\" \"${source_name}\""
+      else
+  	proc_announce "TSD: \"${source_release}\" \"${check_release_size}\" \"${source_release_path}\" \"${source_name}\""
+      fi
+      
       if [ "$SECURITY_PATH" ]; then
         if [ -z "`echo "${source_release_path}/${source_release}" | grep "${SECURITY_PATH}"`" ]; then
           proc_log "Error: Tried to delete \"${source_release_path}/${source_release}\" but that is outside the SECURITY_PATH (${SECURITY_PATH}) - Aborting !"
@@ -324,6 +312,7 @@ proc_delete() {
         proc_debug "would have executed rm -rf \"${source_release_path}/${source_release}\""
       else
         rm -rf "${source_release_path}/${source_release}"
+
         if [ -d "${source_release_path}/${source_release}" ]; then
           proc_log "Error. Deleted ${source_release_path}/${source_release} but its still there! Quitting."
           exit 1
@@ -366,7 +355,11 @@ proc_move() {
   fi
 
   proc_log "$trigger_device at $trigger_device_free MB. Freeing $source_size MB by moving $source_release_path/$source_release -> $dest_release_path ($most_size MB free)."
+
+
+
   proc_announce "TSM: \"$source_release\" \"$source_size\" \"$trigger_device_free\" \"$dest_release_path\" \"$free_space\" \"$source_name\""
+
 
   if [ "$DEBUG" = "TRUE" ]; then
     proc_debug "Would have moved ${source_release_path}/${source_release} (${source_size} MB) to ${dest_release_path}"
@@ -378,7 +371,11 @@ proc_move() {
       rm -rf "${dest_release_path}/${source_release}"
     fi
 
-    cp $COPY_OPTIONS "${source_release_path}/${source_release}" "${dest_release_path}"
+    source_timestamp=$(stat -c %Y "${source_release_path}/${source_release}")
+
+    rclone copy "${source_release_path}/${source_release}/" "${dest_release_path}/${source_release}" $COPY_OPTIONS
+
+    touch -d "@$source_timestamp" "${dest_release_path}/${source_release}"
 
     num_files_source="`ls -1 "$source_release_path/$source_release" | wc -l | tr -d ' '`"
     num_files_dest="`ls -1 "$dest_release_path/$source_release" | wc -l | tr -d ' '`"
@@ -504,9 +501,7 @@ proc_find_sourcedirs() {
   if [ -e "$TMP/oldest_dir.tmp" ]; then
     rm -f "$TMP/oldest_dir.tmp"
   fi
-
-  for incoming_sections in `grep "^INC" $config | grep -E -i "=$trigger_device:"`; do
-proc_debug "SECTION : $incoming_sections"
+  for incoming_sections in `grep "^INC" $config | grep "=$trigger_device:"`; do
     source_name="`echo "$incoming_sections" | cut -d '=' -f1 | cut -c4-`"
     source_device="`echo "$incoming_sections" | cut -d '=' -f2- | cut -d ':' -f1`"
     source_dir="`echo "$incoming_sections" | cut -d ':' -f2`"
@@ -680,7 +675,7 @@ proc_sanity_check() {
     fi
 
     echo "Source dirs for device $trigger_device are:"
-    for incoming_sections in `grep "^INC" $config | grep -E -i "=$trigger_device:"`; do
+    for incoming_sections in `grep "^INC" $config | grep "=$trigger_device:"`; do
       source_name="`echo "$incoming_sections" | cut -d '=' -f1 | cut -c4-`"
       source_device="`echo "$incoming_sections" | cut -d ':' -f1 | cut -d '=' -f2`"
       source_dir="`echo "$incoming_sections" | cut -d ':' -f2`"
@@ -795,11 +790,28 @@ proc_help() {
   proc_exit
 }
 
+proc_translate_by_id(){
+  trigger_deviceid_check="$1"
+  depth_full_path="`echo "$trigger_deviceid_check" | awk -F'/' '{print NF-1}'`"
+  device_relative_location="`ls -l "$trigger_deviceid_check" | tr -s ' '  | cut -d ' ' -f11`"
+  depth_retour="`echo "$device_relative_location" | awk -F'../' '{print NF-1}'`"
+  device_root="`echo "$trigger_deviceid_check" | cut -d '/' -f$(expr $depth_full_path - $depth_retour)`"
+  device_name="`echo "$device_relative_location" | cut -d '/' -f $(expr $depth_retour + 1)`"
+  trigger_device="`echo "/$device_root/$device_name"`"
+}
+
 proc_go() {
   for triggers in `grep "^TRIGGER=" $config`; do
     unset mount_error; unset no_delete; unset mount_errors; unset did_something
 
     trigger_device="`echo "$triggers" | cut -d '=' -f2 | cut -d ':' -f1`"
+	
+	if [ -z "${trigger_device##*/disk/by-*}" ] ;then
+	  org_trigger_device="`echo "$trigger_device"`"
+	  proc_translate_by_id $trigger_device
+	  proc_debug "Translated $org_trigger_device to actual device $trigger_device"
+	fi
+	
     trigger_free="`echo "$triggers" | cut -d ':' -f2`"
     trigger_clean="`echo "$triggers" | cut -d ':' -f3`"
 
@@ -872,8 +884,8 @@ if [ -e "$TMP/tur-space.lock" ]; then
     DEBUG="TRUE"
   fi
 
-  if [ "`find \"$TMP/tur-space.lock\" -type f -mmin -120`" ]; then
-    proc_debug "Lockfile $TMP/tur-space.lock exists and is not 2 hours old yet. Quitting."
+  if [ "`find \"$TMP/tur-space.lock\" -type f -mmin -60`" ]; then
+    proc_debug "Lockfile $TMP/tur-space.lock exists and is not 60 min old yet. Quitting."
     if [ "$DEBUG" = "TRUE" ]; then
       LAST_ERROR="`egrep "Error|Warning" $LOGFILE | tail -n1`"
       if [ "$LAST_ERROR" ]; then
@@ -883,9 +895,9 @@ if [ -e "$TMP/tur-space.lock" ]; then
     fi
     exit 0
   else
-    proc_debug "Lockfile exists, but its older then 2 hours. Removing lockfile."
+    proc_debug "Lockfile exists, but its older then 60 minutes. Removing lockfile."
     touch "$TMP/tur-space.lock"
-  fi
+ fi
 else
   touch "$TMP/tur-space.lock"
 fi
